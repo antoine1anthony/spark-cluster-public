@@ -1,0 +1,175 @@
+version: "3.8"
+
+# Spark 4 "Utility Belt" - Specialized AI Services
+# Copy .env.example to .env and configure before running
+
+services:
+  # A2A Gateway - Agent2Agent Protocol Hub
+  a2a-gateway:
+    container_name: a2a-gateway
+    build:
+      context: ./a2a_wrappers
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${A2A_GATEWAY_PORT:-9000}:9000"
+    environment:
+      - PROVER_URL=http://prover:${PROVER_PORT:-8005}
+      - OCR_URL=http://ocr:8000
+      - WHISPER_URL=http://whisper:8000
+      - GATEWAY_HOST=${SPARK4_HOST:-0.0.0.0}
+      - GATEWAY_PORT=${A2A_GATEWAY_PORT:-9000}
+    depends_on:
+      - prover
+      # - ocr  # Disabled: may need driver 590+ depending on model
+      - whisper
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Math/Logic Reasoning Model (vLLM)
+  prover:
+    container_name: prover-utility
+    image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:25.11-py3}
+    restart: unless-stopped
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "${PROVER_PORT:-8005}:8005"
+    volumes:
+      - ${HF_CACHE_DIR:-./hf_cache}:/root/.cache/huggingface
+      - ./nvfp4_fix.py:/app/nvfp4_fix.py:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASHINFER}
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      bash -c "python3 /app/nvfp4_fix.py ${PROVER_MODEL_ID} &&
+      python3 -m vllm.entrypoints.openai.api_server
+      --model ${PROVER_MODEL_ID}
+      --served-model-name ${PROVER_MODEL_NAME:-prover}
+      --host 0.0.0.0
+      --port 8005
+      --kv-cache-dtype fp8
+      --enable-chunked-prefill
+      --enable-prefix-caching
+      --gpu-memory-utilization ${PROVER_GPU_MEM:-0.35}
+      --max-model-len ${PROVER_MAX_LEN:-8192}
+      --enforce-eager
+      --trust-remote-code"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # OCR Model - DISABLED BY DEFAULT
+  # Enable when your driver supports it (may require 590.44+)
+  # ocr:
+  #   container_name: ocr-utility
+  #   image: ${VLLM_IMAGE_OCR:-nvcr.io/nvidia/vllm:25.12.post1-py3}
+  #   restart: unless-stopped
+  #   ipc: host
+  #   ulimits:
+  #     memlock: -1
+  #     stack: 67108864
+  #   ports:
+  #     - "${OCR_PORT:-8006}:8000"
+  #   volumes:
+  #     - ${HF_CACHE_DIR:-./hf_cache}:/root/.cache/huggingface
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #     - HF_HOME=/root/.cache/huggingface
+  #     - CUDA_VISIBLE_DEVICES=0
+  #   command: >
+  #     python3 -m vllm.entrypoints.openai.api_server
+  #     --model ${OCR_MODEL_ID}
+  #     --served-model-name ocr
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --enforce-eager
+  #     --gpu-memory-utilization 0.35
+  #     --max-model-len 8192
+  #     --trust-remote-code
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 300s
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+  # Whisper Speech-to-Text
+  whisper:
+    container_name: whisper-utility
+    image: ${WHISPER_IMAGE:-fedirz/faster-whisper-server:latest-cuda}
+    restart: unless-stopped
+    ports:
+      - "${WHISPER_PORT:-8007}:8000"
+    volumes:
+      - ${HF_CACHE_DIR:-./hf_cache}:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+      - CUDA_VISIBLE_DEVICES=0
+      - WHISPER__MODEL=${WHISPER_MODEL_ID:-openai/whisper-large-v3-turbo}
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Weather Simulation Service (Proxy)
+  weather-sim:
+    container_name: weather-sim-utility
+    image: python:3.11-slim
+    restart: unless-stopped
+    ports:
+      - "${WEATHER_PORT:-8008}:8008"
+    environment:
+      - WEATHER_TOOL_URL=${WEATHER_BACKEND_URL:-http://localhost:6000}
+    volumes:
+      - ./weather_proxy.py:/app/weather_proxy.py:ro
+    command: ["bash", "-c", "pip install -q fastapi uvicorn httpx && python /app/weather_proxy.py"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes: {}
+
+networks:
+  default:
+    name: spark_utility_net

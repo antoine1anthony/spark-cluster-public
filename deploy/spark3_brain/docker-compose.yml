@@ -1,0 +1,52 @@
+version: "3.8"
+
+# Spark 3 "Brain" - Primary LLM Service
+# Copy .env.example to .env and configure before running
+
+services:
+  brain-llm:
+    container_name: brain-llm
+    image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:25.11-py3}
+    restart: unless-stopped
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "${VLLM_PORT:-8000}:8000"
+      - "${PROMPT_PORT:-8010}:8010"  # Prompt Registry
+    volumes:
+      - ${HF_CACHE_DIR:-./hf_cache}:/root/.cache/huggingface
+      - ${PROMPTS_DIR:-./prompts}:/app/agent-prompts:ro
+      - ./prompt_loader.py:/app/prompt_loader.py:ro
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASHINFER}
+      - CUDA_VISIBLE_DEVICES=0
+      - PROMPTS_DIR=/app/agent-prompts
+      - PROMPT_PORT=${PROMPT_PORT:-8010}
+      - MODEL_ID=${BRAIN_MODEL_ID}
+      - MODEL_NAME=${BRAIN_MODEL_NAME:-brain-llm}
+      - VLLM_PORT=${VLLM_PORT:-8000}
+      - GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.85}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+    command: ["bash", "/app/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+networks:
+  default:
+    name: spark_brain_net
