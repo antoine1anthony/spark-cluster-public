@@ -1,4 +1,4 @@
-# Spark Cluster
+# Spark Cluster-001
 
 A containerized, multi-node AI infrastructure using a **Brain + Utility Belt** architecture for distributed LLM inference and specialized AI services.
 
