@@ -40,6 +40,23 @@ PROVER_URL = os.environ.get("PROVER_URL", "http://localhost:8005")
 # A2A Gateway URL (Utility Belt)
 A2A_GATEWAY_URL = os.environ.get("A2A_GATEWAY_URL", "http://localhost:9000")
 
+# Auteur Video Worker URL (Utility Belt)
+AUTEUR_URL = os.environ.get("AUTEUR_URL", "http://localhost:8000")
+AUTEUR_TOKEN = os.environ.get("AUTEUR_TOKEN", "change-me-in-production")
+AUTEUR_OUTPUT_DIR = Path(os.environ.get("AUTEUR_OUTPUT_DIR", "/app/auteur-output"))
+
+
+def normalize_url(url: str) -> str:
+    """Normalize a URL by stripping trailing slashes and ensuring http:// prefix."""
+    url = url.strip()
+    # Remove trailing slashes
+    url = url.rstrip("/")
+    # Add http:// if no protocol specified
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = f"http://{url}"
+    return url
+
+
 # Prompts directory (mounted in Docker)
 PROMPTS_DIR = Path(os.environ.get("PROMPTS_DIR", "/app/prompts"))
 
@@ -797,6 +814,350 @@ async def a2a_send_file(
         if ctx:
             await ctx.error(error_msg)
         return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Video Generation Tools (Auteur System)
+# =============================================================================
+
+@mcp.tool()
+async def generate_video(
+    prompt: str,
+    model_tier: str = "workhorse",
+    num_frames: int = 17,
+    num_steps: int = 20,
+    ctx: Context = None
+) -> str:
+    """
+    Generate a video from a text prompt using the Auteur system.
+    
+    This uses HunyuanVideo (Text-to-Video) or SVD (Image-to-Video) models
+    running on the GB10 GPU with unified memory architecture.
+    
+    Args:
+        prompt: Text description of the video to generate
+        model_tier: Model to use:
+            - "workhorse" (default): HunyuanVideo T2V - best quality
+            - "experimental": CogVideoX T2V - faster but less stable
+        num_frames: Number of frames (default: 17 for ~2s video at 8fps)
+        num_steps: Inference steps (default: 20, higher = better quality)
+    
+    Returns:
+        JSON string with job_id, status, video_path, and ffprobe stats when complete.
+        Video files are saved to the auteur-output directory.
+    
+    Example:
+        generate_video("A cinematic drone shot of mountains at golden hour sunset")
+    """
+    if ctx:
+        await ctx.info(f"Submitting video generation job ({model_tier})...")
+        await ctx.report_progress(0, 100)
+    
+    client = await get_client()
+    base_url = normalize_url(AUTEUR_URL)
+    headers = {"Authorization": f"Bearer {AUTEUR_TOKEN}"}
+    
+    try:
+        # Submit job
+        response = await client.post(
+            f"{base_url}/jobs/json",
+            headers=headers,
+            json={
+                "model_tier": model_tier,
+                "prompt": prompt,
+                "num_frames": num_frames,
+                "num_steps": num_steps
+            },
+            timeout=30.0
+        )
+        response.raise_for_status()
+        job_result = response.json()
+        job_id = job_result["job_id"]
+        
+        if ctx:
+            await ctx.info(f"Job submitted: {job_id}")
+            await ctx.report_progress(10, 100)
+        
+        # Poll for completion (video generation takes 2-10 minutes)
+        max_polls = 120  # 10 minutes max
+        poll_interval = 5
+        ffprobe_stats = None
+        
+        for poll_num in range(max_polls):
+            await asyncio.sleep(poll_interval)
+            
+            status_response = await client.get(
+                f"{base_url}/jobs/{job_id}",
+                headers=headers,
+                timeout=10.0
+            )
+            status_response.raise_for_status()
+            job_status = status_response.json()
+            
+            progress = job_status.get("progress", 0)
+            status = job_status.get("status", "unknown")
+            
+            if ctx:
+                scaled_progress = 10 + int(progress * 0.8)
+                await ctx.report_progress(scaled_progress, 100)
+            
+            if status == "completed":
+                ffprobe_stats = job_status.get("ffprobe_summary")
+                
+                if ctx:
+                    await ctx.info("Video generation complete! Downloading...")
+                    if ffprobe_stats:
+                        await ctx.info(
+                            f"Video stats: {ffprobe_stats.get('width')}x{ffprobe_stats.get('height')}, "
+                            f"{ffprobe_stats.get('nb_frames')} frames, "
+                            f"{ffprobe_stats.get('size_bytes', 0) / 1024:.1f}KB"
+                        )
+                    await ctx.report_progress(90, 100)
+                
+                # Download the video to local output directory
+                video_response = await client.get(
+                    f"{base_url}/jobs/{job_id}/download",
+                    headers=headers,
+                    timeout=120.0
+                )
+                video_response.raise_for_status()
+                
+                AUTEUR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                local_video_path = AUTEUR_OUTPUT_DIR / f"auteur_{job_id}.mp4"
+                with open(local_video_path, "wb") as f:
+                    f.write(video_response.content)
+                
+                if ctx:
+                    await ctx.info(f"Video saved: {local_video_path}")
+                    await ctx.report_progress(100, 100)
+                
+                result = {
+                    "status": "completed",
+                    "job_id": job_id,
+                    "prompt": prompt,
+                    "model_tier": model_tier,
+                    "num_frames": num_frames,
+                    "video_path": str(local_video_path),
+                    "message": f"Video generated successfully. File: {local_video_path}"
+                }
+                
+                if ffprobe_stats:
+                    result["ffprobe"] = {
+                        "width": ffprobe_stats.get("width"),
+                        "height": ffprobe_stats.get("height"),
+                        "frames": ffprobe_stats.get("nb_frames"),
+                        "duration_s": ffprobe_stats.get("duration"),
+                        "size_bytes": ffprobe_stats.get("size_bytes"),
+                        "codec": ffprobe_stats.get("codec")
+                    }
+                
+                return json.dumps(result, indent=2)
+                
+            elif status == "failed":
+                error = job_status.get("error", "Unknown error")
+                if ctx:
+                    await ctx.error(f"Video generation failed: {error}")
+                return json.dumps({
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": error
+                }, indent=2)
+            
+            if ctx and poll_num % 6 == 0:
+                await ctx.info(f"Generating video... {progress}%")
+        
+        if ctx:
+            await ctx.error("Video generation timed out")
+        return json.dumps({
+            "status": "timeout",
+            "job_id": job_id,
+            "message": "Video generation timed out after 10 minutes."
+        }, indent=2)
+        
+    except httpx.HTTPError as e:
+        error_msg = f"Video generation error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return json.dumps({"error": str(e), "status": "failed"})
+
+
+@mcp.tool()
+async def generate_video_from_image(
+    image_path: str,
+    prompt: str = "animate this image",
+    num_frames: int = 25,
+    num_steps: int = 25,
+    ctx: Context = None
+) -> str:
+    """
+    Generate a video from an input image using SVD (Stable Video Diffusion).
+    
+    This creates smooth motion from a still image, turning photos into
+    short video clips with natural movement.
+    
+    Args:
+        image_path: Path to the input image file (jpg, png)
+        prompt: Optional description of desired motion/animation
+        num_frames: Number of frames (default: 25 for ~1.5s video)
+        num_steps: Inference steps (default: 25)
+    
+    Returns:
+        JSON string with job_id, status, and video_path when complete.
+    
+    Example:
+        generate_video_from_image("/path/to/mountain.jpg", "gentle camera motion")
+    """
+    import base64
+    
+    if ctx:
+        await ctx.info(f"Loading image and submitting I2V job...")
+        await ctx.report_progress(0, 100)
+    
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+    except FileNotFoundError:
+        error_msg = f"Image file not found: {image_path}"
+        if ctx:
+            await ctx.error(error_msg)
+        return json.dumps({"error": error_msg, "status": "failed"})
+    except Exception as e:
+        error_msg = f"Failed to read image: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return json.dumps({"error": error_msg, "status": "failed"})
+    
+    client = await get_client()
+    base_url = normalize_url(AUTEUR_URL)
+    headers = {"Authorization": f"Bearer {AUTEUR_TOKEN}"}
+    
+    try:
+        files = {"input_image": (Path(image_path).name, image_bytes, "image/jpeg")}
+        data = {
+            "model_tier": "validator",
+            "prompt": prompt,
+            "num_frames": str(num_frames),
+            "num_steps": str(num_steps)
+        }
+        
+        response = await client.post(
+            f"{base_url}/jobs",
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=30.0
+        )
+        response.raise_for_status()
+        job_result = response.json()
+        job_id = job_result["job_id"]
+        
+        if ctx:
+            await ctx.info(f"I2V job submitted: {job_id}")
+            await ctx.report_progress(10, 100)
+        
+        max_polls = 60
+        poll_interval = 5
+        ffprobe_stats = None
+        
+        for poll_num in range(max_polls):
+            await asyncio.sleep(poll_interval)
+            
+            status_response = await client.get(
+                f"{base_url}/jobs/{job_id}",
+                headers=headers,
+                timeout=10.0
+            )
+            status_response.raise_for_status()
+            job_status = status_response.json()
+            
+            progress = job_status.get("progress", 0)
+            status = job_status.get("status", "unknown")
+            
+            if ctx:
+                scaled_progress = 10 + int(progress * 0.8)
+                await ctx.report_progress(scaled_progress, 100)
+            
+            if status == "completed":
+                ffprobe_stats = job_status.get("ffprobe_summary")
+                
+                if ctx:
+                    await ctx.info("I2V generation complete! Downloading...")
+                    if ffprobe_stats:
+                        await ctx.info(
+                            f"Video stats: {ffprobe_stats.get('width')}x{ffprobe_stats.get('height')}, "
+                            f"{ffprobe_stats.get('nb_frames')} frames"
+                        )
+                    await ctx.report_progress(90, 100)
+                
+                video_response = await client.get(
+                    f"{base_url}/jobs/{job_id}/download",
+                    headers=headers,
+                    timeout=120.0
+                )
+                video_response.raise_for_status()
+                
+                AUTEUR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                local_video_path = AUTEUR_OUTPUT_DIR / f"auteur_i2v_{job_id}.mp4"
+                with open(local_video_path, "wb") as f:
+                    f.write(video_response.content)
+                
+                if ctx:
+                    await ctx.info(f"Video saved: {local_video_path}")
+                    await ctx.report_progress(100, 100)
+                
+                result = {
+                    "status": "completed",
+                    "job_id": job_id,
+                    "input_image": image_path,
+                    "prompt": prompt,
+                    "model_tier": "validator (SVD)",
+                    "num_frames": num_frames,
+                    "video_path": str(local_video_path),
+                    "message": f"Video generated from image. File: {local_video_path}"
+                }
+                
+                if ffprobe_stats:
+                    result["ffprobe"] = {
+                        "width": ffprobe_stats.get("width"),
+                        "height": ffprobe_stats.get("height"),
+                        "frames": ffprobe_stats.get("nb_frames"),
+                        "duration_s": ffprobe_stats.get("duration"),
+                        "size_bytes": ffprobe_stats.get("size_bytes"),
+                        "codec": ffprobe_stats.get("codec")
+                    }
+                
+                return json.dumps(result, indent=2)
+                
+            elif status == "failed":
+                error = job_status.get("error", "Unknown error")
+                if ctx:
+                    await ctx.error(f"I2V generation failed: {error}")
+                return json.dumps({
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": error
+                }, indent=2)
+            
+            if ctx and poll_num % 6 == 0:
+                await ctx.info(f"Generating video from image... {progress}%")
+        
+        if ctx:
+            await ctx.error("I2V generation timed out")
+        return json.dumps({
+            "status": "timeout",
+            "job_id": job_id,
+            "message": "Video generation timed out."
+        }, indent=2)
+        
+    except httpx.HTTPError as e:
+        error_msg = f"I2V generation error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return json.dumps({"error": str(e), "status": "failed"})
+
+
+# Import asyncio for async operations
+import asyncio
 
 
 # =============================================================================

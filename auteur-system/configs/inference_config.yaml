@@ -1,0 +1,138 @@
+# The Auteur System - Inference Configuration
+# Optimized for NVIDIA DGX Spark (GB10) - ARM64 + Unified Memory
+#
+# Base Image: nvcr.io/nvidia/pytorch:25.10-py3
+# - CUDA 13.0.2 (matches DGX Spark)
+# - Transformer Engine INCLUDED (FP8 ready)
+# - DALI, nvImageCodec, Torch-TensorRT INCLUDED
+
+# =============================================================================
+# SYSTEM CONFIGURATION
+# =============================================================================
+system:
+  # Compute dtype - FP8 is MANDATORY for GB10 bandwidth constraints
+  compute_dtype: float8_e4m3fn
+  
+  # Attention backend priority for GB10 (sm_121)
+  # VERIFIED: FlashAttention 2.7.4+ works on sm_121 (compute capability 12.1)
+  attention_backends:
+    - flash_attn      # VERIFIED WORKING on GB10 (v2.7.4+)
+    - xformers        # Memory efficient alternative
+    - sdpa            # PyTorch native fallback
+  
+  # Memory configuration
+  memory:
+    offload_to_cpu: false  # Pointless on unified memory
+    enable_gradient_checkpointing: false
+    max_split_size_mb: 512
+  
+  # Compilation settings
+  torch_compile:
+    enabled: true
+    mode: reduce-overhead
+    fullgraph: false  # Safer for video models
+    dynamic: true
+
+# =============================================================================
+# MODEL TIERS
+# =============================================================================
+models:
+  # Tier 1: Validator (Fast pipeline testing)
+  validator:
+    name: stable-video-diffusion
+    repo_id: stabilityai/stable-video-diffusion-img2vid-xt
+    dtype: float16  # Small enough that FP16 works
+    memory_estimate_gb: 8
+    use_cases:
+      - pipeline_validation
+      - quick_tests
+      - image_to_video
+    config:
+      num_frames: 25
+      fps: 7
+      motion_bucket_id: 127
+      noise_aug_strength: 0.02
+
+  # Tier 2: Workhorse (Production quality T2V)
+  workhorse:
+    name: hunyuan-video
+    repo_id: tencent/HunyuanVideo
+    dtype: float8_e4m3fn  # MANDATORY
+    memory_estimate_gb: 45
+    use_cases:
+      - production
+      - text_to_video
+      - high_quality
+    config:
+      num_frames: 49
+      fps: 24
+      height: 720
+      width: 1280
+      guidance_scale: 6.0
+      num_inference_steps: 50
+
+  # Tier 3: Heavy (Maximum quality, full memory utilization)
+  heavy:
+    name: wan2.1-t2v
+    repo_id: Wan-AI/Wan2.1-T2V-14B
+    dtype: float8_e4m3fn  # MANDATORY
+    memory_estimate_gb: 95
+    use_cases:
+      - ultra_quality
+      - long_form_video
+      - cinematic
+    config:
+      num_frames: 81
+      fps: 24
+      height: 1080
+      width: 1920
+      guidance_scale: 5.0
+      num_inference_steps: 100
+
+# =============================================================================
+# EXECUTION MODES
+# =============================================================================
+execution:
+  # Mode A: Factory (Default) - Maximum throughput
+  factory:
+    description: "Run independent jobs on each node"
+    nodes: [spark3, spark4]
+    throughput_multiplier: 2.0
+    model_size_limit_gb: 110
+    strategy: independent
+    
+  # Mode B: Titan - For models > 110GB
+  titan:
+    description: "Ring Sequence Parallelism across nodes"
+    nodes: [spark3, spark4]
+    strategy: ring_parallel
+    backend: xdit
+    min_model_size_gb: 110
+
+# =============================================================================
+# CLUSTER CONFIGURATION
+# =============================================================================
+cluster:
+  spark3:
+    hostname: ${SPARK3_HOSTNAME:-node1}
+    ip: ${SPARK3_HOST:-localhost}
+    role: primary
+    gpu_memory_gb: 128
+    
+  spark4:
+    hostname: ${SPARK4_HOSTNAME:-node2}
+    ip: ${SPARK4_HOST:-localhost}
+    role: secondary
+    gpu_memory_gb: 128
+
+# =============================================================================
+# TELEMETRY
+# =============================================================================
+telemetry:
+  enabled: true
+  metrics:
+    - tokens_per_second
+    - frames_per_second
+    - memory_utilization
+    - bandwidth_utilization
+  log_interval_seconds: 10

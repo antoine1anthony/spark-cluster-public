@@ -1,6 +1,6 @@
 # Spark Cluster
 
-A containerized, multi-node AI infrastructure using a **Brain + Utility Belt** architecture for distributed LLM inference and specialized AI services.
+A containerized, multi-node AI infrastructure using a **"Brain & Brawn"** architecture for distributed LLM inference, specialized AI services, and AI video generation.
 
 ## Architecture
 
@@ -14,7 +14,8 @@ A containerized, multi-node AI infrastructure using a **Brain + Utility Belt** a
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Node 2 "Utility Belt"                                            │
+│ Node 2 "Utility" (Brawn)                                         │
+│  • Auteur Video Worker (T2V/I2V) ──────────────────── Port 8000 │
 │  • Math/Logic Prover (vLLM) ───────────────────────── Port 8005 │
 │  • Whisper Speech-to-Text ─────────────────────────── Port 8007 │
 │  • Weather Proxy ──────────────────────────────────── Port 8008 │
@@ -29,7 +30,8 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams and data 
 | Component | Description |
 |-----------|-------------|
 | **Brain Node** | Primary LLM with vLLM optimizations (FP4/FP8, chunked prefill, prefix caching) |
-| **Utility Belt** | Specialized services: math proofs, transcription, weather |
+| **Utility Node** | Heavy compute: video generation, math proofs, transcription |
+| **Auteur System** | AI Video Generation (HunyuanVideo T2V, SVD I2V) with ffprobe validation |
 | **MCP Server** | Model Context Protocol for tool integration |
 | **A2A Gateway** | Agent-to-Agent protocol for inter-service communication |
 | **Prompt Registry** | Dynamic prompt management with `{{MODEL_NAME}}` substitution |
@@ -65,22 +67,33 @@ docker compose up -d
 ### 4. Verify
 
 ```bash
+# Brain Node
 curl http://localhost:8000/v1/models   # Brain LLM
+
+# Utility Node
+curl http://localhost:8000/health      # Auteur Worker (video generation)
 curl http://localhost:8005/v1/models   # Prover
 curl http://localhost:8007/health      # Whisper
+curl http://localhost:9000/health      # A2A Gateway
 ```
 
 ## Project Structure
 
 ```
 spark-cluster-public/
+├── auteur-system/              # AI Video Generation
+│   ├── server.py               # FastAPI job queue
+│   ├── generate.py             # Model inference
+│   ├── Dockerfile.auteur
+│   └── tests/
 ├── deploy/
 │   ├── spark3_brain/           # Brain node
 │   │   ├── docker-compose.yml
 │   │   ├── prompt_loader.py    # Prompt registry service
 │   │   └── entrypoint.sh
-│   ├── spark4_utility/         # Utility belt
+│   ├── spark4_utility/         # Utility node (Brawn)
 │   │   ├── docker-compose.yml
+│   │   ├── a2a_wrappers/       # A2A Gateway
 │   │   └── weather_proxy.py
 │   └── prompt_browser/         # Streamlit UI
 │       └── app.py
@@ -130,7 +143,12 @@ Configure your MCP client:
 }
 ```
 
-**Available tools:** `weather_forecast`, `transcribe`, `prove`, `kb_search`, `pdf_sync`, `a2a_*`
+**Available tools:**
+- `generate_video` – Text-to-video (HunyuanVideo)
+- `generate_video_from_image` – Image-to-video (SVD)
+- `weather_forecast`, `transcribe`, `prove`
+- `kb_search`, `pdf_sync`
+- `a2a_discover_agents`, `a2a_send_message`, `a2a_get_task`
 
 ## Configuration
 
@@ -140,6 +158,8 @@ All settings via environment variables. Key options:
 |----------|---------|-------------|
 | `BRAIN_MODEL_ID` | *(required)* | HuggingFace model ID |
 | `PROVER_MODEL_ID` | *(required)* | Prover model ID |
+| `AUTEUR_TOKEN` | `change-me-in-production` | Video worker auth token |
+| `AUTEUR_URL` | `http://localhost:8000` | Video worker endpoint |
 | `GPU_MEM_UTIL` | `0.85` | GPU memory utilization (0-1) |
 | `MAX_MODEL_LEN` | `131072` | Maximum context length |
 | `VLLM_IMAGE` | `nvcr.io/nvidia/vllm:25.11-py3` | vLLM container image |

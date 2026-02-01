@@ -1,0 +1,138 @@
+# The Auteur System - Video Generation Pipeline for DGX Spark (GB10)
+# Optimized for ARM64 + Unified Memory + FP8 Compute
+
+# =============================================================================
+# BASE IMAGE: PyTorch 25.10 - Optimized for Blackwell (sm_121)
+# =============================================================================
+# - CUDA 13.0.2 (matches DGX Spark CUDA toolkit)
+# - Transformer Engine (FP8 support) - INCLUDED
+# - DALI, nvImageCodec - INCLUDED
+# - Torch-TensorRT - INCLUDED
+# =============================================================================
+FROM nvcr.io/nvidia/pytorch:25.10-py3
+
+# Metadata
+LABEL maintainer="antoine1anthony"
+LABEL description="The Auteur System - High-Performance Video Generation for GB10 (Hardened v2)"
+LABEL version="2.0.0"
+LABEL base_image="nvcr.io/nvidia/pytorch:25.10-py3"
+LABEL cuda_version="13.0.2"
+LABEL compute_capability="sm_121"
+LABEL worker_enforcement="single-worker-only"
+
+# System Dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ninja-build \
+    git \
+    libaio-dev \
+    ffmpeg \
+    curl \
+    libsm6 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# ENVIRONMENT: GB10 / Blackwell Optimizations
+# =============================================================================
+# sm_121 = Blackwell architecture (GB10)
+ENV TORCH_CUDA_ARCH_LIST="9.0;12.1"
+ENV MAX_JOBS=4
+ENV CUDA_HOME=/usr/local/cuda
+
+# Unified memory optimizations
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV TOKENIZERS_PARALLELISM=false
+ENV HF_HOME=/root/.cache/huggingface
+
+# Worker enforcement - CRITICAL: must be 1
+ENV WEB_CONCURRENCY=1
+ENV AUTEUR_NO_OFFLOAD=true
+ENV AUTEUR_COMPILE=false
+
+# =============================================================================
+# DEPENDENCIES: Video Generation Stack
+# =============================================================================
+
+# NOTE: Transformer Engine is ALREADY INCLUDED in pytorch:25.10-py3
+# No need to install separately!
+
+# =============================================================================
+# ATTENTION BACKEND STRATEGY FOR GB10 (sm_121):
+# =============================================================================
+# VERIFIED WORKING on GB10:
+# - FlashAttention 2.7.4+ : ✓ Works (tested on sm_121 / compute 12.1)
+# - PyTorch SDPA          : ✓ Works (native fallback)
+# - xFormers              : ✓ Works (memory efficient)
+# =============================================================================
+
+# 1. Packaging tools (needed for other installs)
+RUN pip install --no-cache-dir packaging wheel setuptools
+
+# 2. FlashAttention-2 (VERIFIED WORKING on sm_121 with version 2.7.4+)
+# Limiting MAX_JOBS prevents OOM on Grace CPU during compilation
+RUN MAX_JOBS=4 pip install --no-cache-dir flash-attn --no-build-isolation || \
+    echo "FlashAttn build failed - SDPA fallback available"
+
+# 3. xFormers (optional, memory efficient attention)
+RUN pip install --no-cache-dir xformers 2>/dev/null || \
+    echo "xFormers skipped - FlashAttn/SDPA will be used"
+
+# 2. Diffusers & Accelerate (Bleeding Edge for HunyuanVideo, Wan2.1, SVD)
+RUN pip install --no-cache-dir \
+    git+https://github.com/huggingface/diffusers.git \
+    accelerate \
+    transformers \
+    sentencepiece \
+    protobuf \
+    safetensors \
+    einops \
+    omegaconf
+
+# 3. Video Processing (decord not available on ARM64, using alternatives)
+RUN pip install --no-cache-dir \
+    imageio \
+    imageio-ffmpeg \
+    av \
+    opencv-python-headless
+
+# 4. xDiT / xFuser (Distributed Inference for large video models)
+RUN pip install --no-cache-dir xfuser 2>/dev/null || \
+    echo "xfuser install skipped - single-node mode available"
+
+# 5. torchao for advanced quantization (FP8, INT8)
+RUN pip install --no-cache-dir torchao 2>/dev/null || \
+    echo "torchao skipped - using Transformer Engine FP8"
+
+# 6. API & Utilities
+RUN pip install --no-cache-dir \
+    pyyaml \
+    tqdm \
+    pillow \
+    opencv-python-headless \
+    httpx \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart \
+    requests
+
+# =============================================================================
+# APPLICATION
+# =============================================================================
+WORKDIR /app
+
+# Copy application code
+COPY . /app/
+
+# Verify ffprobe is available (CRITICAL for video validation)
+RUN ffprobe -version && echo "✓ ffprobe verified"
+
+# Healthcheck - check both GPU and server health endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Default command - ENFORCES single worker
+# Note: --workers 1 is critical - GPU can only process 1 job at a time
+CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

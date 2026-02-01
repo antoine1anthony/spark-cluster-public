@@ -15,6 +15,8 @@ prompts/
 │   └── research_assistant.md
 ├── science/
 │   └── physics_calculus.md
+├── video/
+│   └── director.md        # Video generation prompts for Auteur
 └── common/
     └── a2a_skills.md      # Shared A2A capability definitions
 ```

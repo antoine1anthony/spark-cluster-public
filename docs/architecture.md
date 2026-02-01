@@ -2,7 +2,10 @@
 
 ## Overview
 
-The Spark Cluster follows a "Brain + Utility Belt" architecture pattern, distributing AI workloads across multiple nodes for optimal resource utilization.
+The Spark Cluster follows a "Brain & Brawn" architecture pattern, distributing AI workloads across multiple nodes for optimal resource utilization:
+
+- **Brain Node**: Orchestration, logic, and user interfaces
+- **Utility Node**: Heavy compute workloads (video generation, reasoning, transcription)
 
 ## Architecture Diagram
 
@@ -18,8 +21,9 @@ flowchart TB
         WEB[OpenWebUI]
     end
     
-    subgraph utility["Node 2: Utility Belt"]
+    subgraph utility["Node 2: Utility (Brawn)"]
         A2A[A2A Gateway]
+        AUT[Auteur Worker<br/>Video Generation]
         PRV[Prover Model]
         WHI[Whisper]
         WTH[Weather Proxy]
@@ -28,6 +32,8 @@ flowchart TB
     WEB --> LLM
     WEB --> MCP
     MCP --> A2A
+    MCP -.->|direct| AUT
+    A2A --> AUT
     A2A --> PRV
     A2A --> WHI
     A2A --> WTH
@@ -52,10 +58,11 @@ flowchart TB
 | PostgreSQL | 5433 | PostgreSQL | Vector database |
 | OpenWebUI | 8080 | HTTP | Web interface |
 
-### Utility Belt Node (Node 2)
+### Utility Node (Node 2)
 
 | Service | Port | Protocol | Description |
 |---------|------|----------|-------------|
+| Auteur Worker | 8000 | HTTP/REST | AI Video Generation (HunyuanVideo, SVD) |
 | Prover | 8005 | HTTP/OpenAI | Math/logic reasoning |
 | Whisper | 8007 | HTTP/REST | Speech-to-text |
 | Weather Proxy | 8008 | HTTP/REST | Weather forecasting |
@@ -70,8 +77,29 @@ flowchart TB
 3. LLM processes with optional tool calls via MCP
 4. MCP routes tool calls to appropriate backend:
    - Local tools (KB, PDF)
-   - Remote tools via A2A Gateway (Prover, Whisper)
+   - Remote tools via A2A Gateway (Prover, Whisper, Auteur)
+   - Direct video generation via Auteur Worker
 5. Results aggregated and returned to user
+
+### Video Generation Flow
+
+```mermaid
+sequenceDiagram
+    participant C as MCP Client
+    participant M as MCP Server
+    participant A as Auteur Worker
+    
+    C->>M: generate_video(prompt)
+    M->>A: POST /jobs/json
+    A-->>M: job_id
+    loop Poll for completion
+        M->>A: GET /jobs/{id}
+        A-->>M: status (pending/running/completed)
+    end
+    M->>A: GET /jobs/{id}/download
+    A-->>M: video.mp4
+    M->>C: Video file path + ffprobe stats
+```
 
 ### A2A Protocol Flow
 
@@ -80,9 +108,9 @@ sequenceDiagram
     participant C as MCP Client
     participant M as MCP Server
     participant G as A2A Gateway
-    participant P as Prover/Whisper
+    participant P as Prover/Whisper/Auteur
     
-    C->>M: tool call (prove/transcribe)
+    C->>M: tool call (prove/transcribe/generate video)
     M->>G: JSON-RPC message/send
     G->>P: Forward to skill
     P->>G: Result
@@ -94,19 +122,23 @@ sequenceDiagram
 
 ### Recommended GPU Memory Split
 
-| Node | Service | GPU Memory |
-|------|---------|-----------|
-| Brain | Primary LLM | 80-85% |
-| Brain | Prompt Registry | CPU only |
-| Utility | Prover | 30-40% |
-| Utility | Whisper | 20-30% |
-| Utility | Other services | CPU only |
+| Node | Service | GPU Memory | Notes |
+|------|---------|-----------|-------|
+| Brain | Primary LLM | 80-85% | Main orchestration |
+| Brain | Prompt Registry | CPU only | |
+| Utility | Auteur Worker | 30-50% | HunyuanVideo ~36GB, SVD ~8GB |
+| Utility | Prover | 30-40% | Can share with Auteur (not concurrent) |
+| Utility | Whisper | 20-30% | Lightweight |
+| Utility | Other services | CPU only | |
+
+> **Note**: On GB10 with unified memory (128GB), Auteur Worker typically uses ~30GB peak RSS while keeping models in fast path. The `no_offload=True` setting avoids CPU offload overhead on unified memory systems.
 
 ### Scaling Considerations
 
 - **Vertical**: Increase `GPU_MEM_UTIL` for larger models
-- **Horizontal**: Add more Utility Belt nodes for specialized tasks
+- **Horizontal**: Add more Utility nodes for specialized tasks
 - **Context Length**: Adjust `MAX_MODEL_LEN` based on GPU memory
+- **Video Generation**: Single worker per node (serialized queue for OOM prevention)
 
 ## Network Requirements
 

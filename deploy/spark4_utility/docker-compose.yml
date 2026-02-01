@@ -1,7 +1,11 @@
 version: "3.8"
 
-# Spark 4 "Utility Belt" - Specialized AI Services
+# Spark "Utility Belt" - Specialized AI Services
 # Copy .env.example to .env and configure before running
+#
+# Architecture: "Brain & Brawn"
+# - Brain Node: Orchestrator & Logic (MCP Server, Agent coordination)
+# - Utility Node: Compute & Rendering (This compose file - video gen, reasoning, transcription)
 
 services:
   # A2A Gateway - Agent2Agent Protocol Hub
@@ -17,18 +21,55 @@ services:
       - PROVER_URL=http://prover:${PROVER_PORT:-8005}
       - OCR_URL=http://ocr:8000
       - WHISPER_URL=http://whisper:8000
+      # Auteur Video Worker
+      - AUTEUR_URL=http://auteur-worker:8000
+      - AUTEUR_TOKEN=${AUTEUR_TOKEN:-change-me-in-production}
+      # Gateway host (advertised in Agent Card)
       - GATEWAY_HOST=${SPARK4_HOST:-0.0.0.0}
       - GATEWAY_PORT=${A2A_GATEWAY_PORT:-9000}
     depends_on:
       - prover
       # - ocr  # Disabled: may need driver 590+ depending on model
       - whisper
+      - auteur-worker
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # Auteur Video Worker - HunyuanVideo (T2V) & SVD (I2V)
+  # Optimized for GB10 unified memory architecture
+  auteur-worker:
+    container_name: auteur-worker
+    build:
+      context: ../../auteur-system
+      dockerfile: Dockerfile.auteur
+    restart: unless-stopped
+    ports:
+      - "${AUTEUR_PORT:-8000}:8000"
+    volumes:
+      - ${AUTEUR_OUTPUT_DIR:-./auteur-output}:/app/output
+      - ${HF_CACHE_DIR:-./hf_cache}:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+      - AUTEUR_TOKEN=${AUTEUR_TOKEN:-change-me-in-production}
+      - CUDA_VISIBLE_DEVICES=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # Math/Logic Reasoning Model (vLLM)
   prover:

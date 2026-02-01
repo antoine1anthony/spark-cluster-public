@@ -31,7 +31,17 @@ Specific model identifiers have been replaced with placeholders:
 | `nvidia/Llama-3_3-Nemotron-Super-49B-v1_5-NVFP4` | `${BRAIN_MODEL_ID}` |
 | Specific prover models | `${PROVER_MODEL_ID}` |
 
-### 4. Removed Content
+### 4. Secrets and Tokens
+
+Authentication tokens are replaced with safe placeholders:
+
+| Original Pattern | Replacement |
+|-----------------|-------------|
+| Production API tokens | `change-me-in-production` |
+| `AUTEUR_TOKEN` | Environment variable with placeholder default |
+| Internal network IPs | `localhost` defaults |
+
+### 5. Removed Content
 
 The following was excluded from the public repository:
 
@@ -39,6 +49,7 @@ The following was excluded from the public repository:
 - Debug logs and cursor configuration
 - HuggingFace cache contents
 - Any credentials or API keys
+- Generated video outputs
 
 ## Verification Checklist
 
@@ -76,10 +87,17 @@ All configurable values should be in `.env.example`:
 BRAIN_MODEL_ID=       # HuggingFace model ID
 PROVER_MODEL_ID=      # Prover model ID
 
-# Optional with defaults
+# Service URLs (required for multi-node)
 SPARK3_HOST=localhost
 SPARK4_HOST=localhost
+AUTEUR_URL=http://localhost:8000
+
+# Secrets (MUST be changed in production)
+AUTEUR_TOKEN=change-me-in-production
+
+# Optional with defaults
 GPU_MEM_UTIL=0.85
+AUTEUR_OUTPUT_DIR=./auteur-output
 ```
 
 ## Secret Scanning Tools
