@@ -30,7 +30,7 @@ from typing import Dict, Any, Optional, Tuple, List
 # Configuration
 AUTEUR_URL = os.environ.get("AUTEUR_URL", "http://localhost:8000")
 AUTEUR_TOKEN = os.environ.get("AUTEUR_TOKEN", "change-me-in-production")
-OUTPUT_DIR = Path(os.environ.get("TEST_OUTPUT_DIR", "/home/antoine1anthony/auteur-output"))
+OUTPUT_DIR = Path(os.environ.get("TEST_OUTPUT_DIR", "./auteur-output"))
 RESULTS_DIR = Path(__file__).parent / "results"
 
 # Timeouts
