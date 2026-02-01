@@ -1,4 +1,4 @@
-# Spark Cluster
+# Spark-Cluster-001
 
 A containerized, multi-node AI infrastructure using a **"Brain & Brawn"** architecture for distributed LLM inference, specialized AI services, and AI video generation.
 
